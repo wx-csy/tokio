@@ -1,7 +1,7 @@
+use rand::random;
 use std::error::Error;
 use std::sync::Arc;
 use std::sync::RwLock;
-use rand::random;
 
 #[derive(Debug)]
 struct TestStruct(i32);
@@ -13,21 +13,26 @@ impl Drop for TestStruct {
     }
 }
 
-#[tokio::main]
+const NUM_ITER: usize = 10000000;
+const NUM_TASK: usize = 32;
+const WRITE_RATIO: u32 = 10000;
+const YIELD_RATIO: usize = 2000;
+
+#[tokio::main(worker_threads = 6)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let test_data = Arc::new(RwLock::new(TestStruct(3)));
-    let handles: Vec<_> = (0..32)
+    let handles: Vec<_> = (0..NUM_TASK)
         .map(|_| {
             let test_data = test_data.clone();
             tokio::spawn(async move {
-                for j in 0usize..10000000usize {
-                    if random::<u32>() % 10000 == 0 {
-                        *test_data.write().unwrap() = TestStruct(random::<u8>() as i32);
+                for j in 0..NUM_ITER {
+                    if random::<u32>() % WRITE_RATIO == 0 {
+                        test_data.write().unwrap().0 += 1;
                     } else {
                         let data = { test_data.read().unwrap().0 };
                         assert_ne!(data, -1);
                     }
-                    if j & 0xfff == 0 {
+                    if j % YIELD_RATIO == 0 {
                         tokio::task::yield_now().await;
                     }
                 }
@@ -38,5 +43,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for handle in handles {
         handle.await.unwrap();
     }
+
+    eprintln!("Total updated: {}", test_data.read().unwrap().0);
+
     Ok(())
 }

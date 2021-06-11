@@ -7,14 +7,14 @@ use crate::loom::sync::atomic::Ordering;
 
 /// An RCU pointer.
 #[derive(Debug)]
-pub struct Rcu<T: Send> {
+pub struct Rcu<T: Send + 'static> {
     data: AtomicPtr<T>
 }
 
-unsafe impl <T: Send> Send for Rcu<T> {}
-unsafe impl <T: Send + Sync> Sync for Rcu<T> {}
+unsafe impl <T: Send + 'static> Send for Rcu<T> {}
+unsafe impl <T: Send + Sync + 'static> Sync for Rcu<T> {}
 
-impl<T: Send> Rcu<T> {
+impl<T: Send + 'static> Rcu<T> {
     /// Run sychronization task on all workers, ensuring grace periods are expired.
     async fn synchronize_rcu() {
         #[derive(Clone)]
@@ -41,10 +41,30 @@ impl<T: Send> Rcu<T> {
         }
     }
 
-    /// Read a the current RCU pointer. The returned reference is immutable and `!Send`.
+    /// Read the current RCU pointer. The returned reference is immutable and `!Send`.
     pub fn read(&self) -> RcuReference<T> {
         RcuReference {
             data: self.data.load(Ordering::Acquire) as *const T,
+        }
+    }
+
+    /// Compare the current RCU pointer with `expect`, and if equal, update it with `new`, 
+    /// return the synchronization handle. Otherwise, return the reference to the current pointer.
+    /// The entire operation is guaranteed to be atomic.
+    pub fn compare_update(&self, expect: RcuReference<T>, new: T) -> Result<RcuSyncHandle<T>, RcuReference<T>> {
+        let ptr_new = Box::into_raw(Box::new(new));
+        match self.data.compare_exchange(expect.data as *mut T, ptr_new, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(old) => {
+                Ok(RcuSyncHandle {
+                    data: old
+                })
+            },
+            Err(old) => {
+                std::mem::drop(unsafe { Box::from_raw(ptr_new) });
+                Err(RcuReference {
+                    data: old,
+                })
+            },
         }
     }
 
@@ -75,28 +95,47 @@ impl<T: Send> Rcu<T> {
 
     /// Consume this `Rcu`. Return the raw pointer for the inner value.
     pub fn into_raw(self) -> *mut T {
-        // Boxed value can be unboxed by `*`. This is specially supported by Rust compiler.
         self.data.load(Ordering::Acquire)
     }
 }
 
 
 #[derive(Debug)]
-#[must_use = "dropping `RcuSyncHandle` will cause memory leak"]
-pub struct RcuSyncHandle<T: Send> {
+pub struct RcuSyncHandle<T: Send + 'static> {
     data: *mut T
 }
 
-unsafe impl<T: Send> Send for RcuSyncHandle<T> {}
+unsafe impl<T: Send + 'static> Send for RcuSyncHandle<T> {}
 
-impl<T: Send> RcuSyncHandle<T> {
+struct PointerWrapper<T: Send + 'static>(*mut T);
+unsafe impl<T: Send + 'static> Send for PointerWrapper<T> {}
+
+impl<T: Send + 'static> RcuSyncHandle<T> {
+    async unsafe fn sync_and_get(data: PointerWrapper<T>) -> Box<T> {
+        Rcu::<T>::synchronize_rcu().await;
+        Box::from_raw(data.0)
+    }
+
     pub async fn get(self) -> T {
         *self.get_boxed().await
     }
 
-    pub async fn get_boxed(self) -> Box<T> {
-        Rcu::<T>::synchronize_rcu().await;
-        unsafe { Box::from_raw(self.data) }
+    pub async fn get_boxed(mut self) -> Box<T> {
+        let ptr = PointerWrapper(std::mem::replace(&mut self.data, std::ptr::null_mut()));
+        unsafe { Self::sync_and_get(ptr) }.await 
+    }
+
+    /// Do not run synchronization task and leak the old value.
+    pub fn leak(self) {}
+}
+
+impl<T: Send + 'static> Drop for RcuSyncHandle<T> {
+    fn drop(&mut self) {
+        let ptr = std::mem::replace(&mut self.data, std::ptr::null_mut());
+        if !ptr.is_null() {
+            let wrapped_pointer = PointerWrapper(ptr);
+            crate::spawn(async move { unsafe { Self::sync_and_get(wrapped_pointer) }.await });
+        }
     }
 }
 

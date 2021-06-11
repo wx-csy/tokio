@@ -1,7 +1,7 @@
+use rand::random;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::Rcu;
-use rand::random;
 
 #[derive(Debug)]
 struct TestStruct(i32);
@@ -13,30 +13,51 @@ impl Drop for TestStruct {
     }
 }
 
-#[tokio::main]
+const NUM_ITER: usize = 10000000;
+const NUM_TASK: usize = 32;
+const WRITE_RATIO: u32 = 1000;
+const YIELD_RATIO: usize = 2000;
+
+#[tokio::main(worker_threads = 16)]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let test_data = Arc::new(unsafe { Rcu::new(TestStruct(3)) });
-    let handles: Vec<_> = (0..32)
+    let test_data = Arc::new(unsafe { Rcu::new(TestStruct(0)) });
+    let handles: Vec<_> = (0..NUM_TASK)
         .map(|_| {
             let test_data = test_data.clone();
             tokio::spawn(async move {
-                for j in 0usize..10000000usize {
-                    if random::<u32>() % 10000 == 0 {
-                        test_data.update(TestStruct(random::<u8>() as i32)).get().await;
+                let mut update_cnt = 0;
+                for j in 0..NUM_ITER {
+                    if random::<u32>() % WRITE_RATIO == 0 {
+                        {
+                            let mut old = test_data.read();
+                            loop {
+                                let new = TestStruct(old.0 + 1);
+                                match test_data.compare_update(old, new) {
+                                    Ok(handle) => break handle,
+                                    Err(current) => old = current,
+                                }
+                            }
+                        }.get().await;
+                        update_cnt += 1;
                     } else {
                         let data = (*test_data.read()).0;
                         assert_ne!(data, -1);
                     }
-                    if j & 0xfff == 0 {
+                    if j & YIELD_RATIO == 0 {
                         tokio::task::yield_now().await;
                     }
                 }
+                update_cnt
             })
         })
         .collect();
 
+    let mut total = 0;
     for handle in handles {
-        handle.await.unwrap();
+        total += handle.await.unwrap();
     }
+    eprintln!("Total updated: {}", total);
+    assert_eq!(total, test_data.read().0);
+
     Ok(())
 }

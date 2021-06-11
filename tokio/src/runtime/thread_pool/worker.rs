@@ -72,7 +72,7 @@ struct Core {
     rand: FastRand,
 
     /// Worker-affined task queue
-    affined: Arc<Mutex<VecDeque<Notified>>>,
+    affined: mpsc::Receiver<Notified>,
 }
 
 /// State shared across all workers
@@ -111,7 +111,7 @@ pub(super) struct Remote {
     unpark: Unparker,
 
     /// Worker-affined task queue
-    affined: Arc<Mutex<VecDeque<Notified>>>,
+    affined: Mutex<mpsc::Sender<Notified>>,
 }
 
 impl Remote {
@@ -122,7 +122,7 @@ impl Remote {
 
     /// Schedule a worker-affined task
     pub(super) fn schedule(&self, task: Notified) {
-        self.affined.lock().push_back(task);
+        self.affined.lock().send(task);
         self.unpark.unpark();
     }
 }
@@ -164,7 +164,7 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
         let park = park.clone();
         let unpark = park.unpark();
 
-        let affined_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let (tx, rx) = mpsc::channel();
 
         cores.push(Box::new(Core {
             id,
@@ -176,7 +176,7 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
             tasks: LinkedList::new(),
             park: Some(park),
             rand: FastRand::new(seed()),
-            affined: Arc::clone(&affined_queue),
+            affined: rx,
         }));
 
         remotes.push(Remote {
@@ -184,7 +184,7 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
             steal,
             pending_drop: task::TransferStack::new(),
             unpark,
-            affined: Arc::clone(&affined_queue),
+            affined: Mutex::new(tx),
         });
     }
 
@@ -492,7 +492,7 @@ impl Core {
     }
 
     fn next_local_task(&mut self) -> Option<Notified> {
-        self.lifo_slot.take().or_else(|| self.affined.lock().pop_front()).or_else(|| self.run_queue.pop())
+        self.lifo_slot.take().or_else(|| self.affined.try_recv().ok()).or_else(|| self.run_queue.pop())
     }
 
     fn steal_work(&mut self, worker: &Worker) -> Option<Notified> {
@@ -560,13 +560,23 @@ impl Core {
 
     /// Returns `true` if the transition happened.
     fn transition_from_parked(&mut self, worker: &Worker) -> bool {
+        // If a task is received, put it in the lifo slot.
+        if self.lifo_slot.is_none() {
+            if let Ok(task) = self.affined.try_recv() {
+                assert!(self.lifo_slot.is_none());
+                self.lifo_slot = Some(task);
+            }
+        }
+
         // If a task is in the lifo slot, then we must unpark regardless of
         // being notified
-        if self.lifo_slot.is_some() || !self.affined.lock().is_empty() {
+        if self.lifo_slot.is_some() {
             worker.shared.idle.unpark_worker_by_id(worker.index);
             self.is_searching = true;
             return true;
         }
+
+
 
         if worker.shared.idle.is_parked(worker.index) {
             return false;
