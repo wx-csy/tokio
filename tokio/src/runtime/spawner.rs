@@ -41,5 +41,18 @@ cfg_rt! {
                 Spawner::ThreadPool(spawner) => spawner.spawn(future),
             }
         }
+
+        pub(crate) fn spawn_all<F>(&self, future: F) -> Box<[JoinHandle<F::Output>]>
+        where
+            F: Future + Send + Clone + 'static,
+            F::Output: Send + 'static,
+        {
+            match self {
+                #[cfg(feature = "rt")]
+                Spawner::Basic(spawner) => vec![spawner.spawn(future)].into_boxed_slice(),
+                #[cfg(feature = "rt-multi-thread")]
+                Spawner::ThreadPool(spawner) => spawner.spawn_all(future),
+            }
+        }
     }
 }

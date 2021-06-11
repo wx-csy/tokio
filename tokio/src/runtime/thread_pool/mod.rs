@@ -98,6 +98,20 @@ impl Spawner {
         handle
     }
 
+    /// Spawns clones of a future onto every thread in the thread pool
+    pub(crate) fn spawn_all<F>(&self, future: F) -> Box<[JoinHandle<F::Output>]>
+    where
+        F: crate::future::Future + Send + Clone + 'static,
+        F::Output: Send + 'static,
+    {
+        let handles = self.shared.remotes().iter().map(|remote| {
+            let (task, handle) = task::joinable(future.clone());
+            remote.schedule(task);
+            handle
+        }).collect();
+        handles
+    }
+
     pub(crate) fn shutdown(&mut self) {
         self.shared.close();
     }

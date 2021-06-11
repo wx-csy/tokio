@@ -283,6 +283,7 @@ cfg_rt! {
 
     mod spawn;
     pub use spawn::spawn;
+    pub(crate) use spawn::spawn_all;
 
     cfg_rt_multi_thread! {
         pub use blocking::block_in_place;

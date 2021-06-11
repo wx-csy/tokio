@@ -1,4 +1,5 @@
 use crate::runtime;
+use crate::runtime::task;
 use crate::task::JoinHandle;
 use crate::util::error::CONTEXT_MISSING_ERROR;
 
@@ -133,5 +134,16 @@ cfg_rt! {
         .expect(CONTEXT_MISSING_ERROR);
         let task = crate::util::trace::task(task, "task");
         spawn_handle.spawn(task)
+    }
+
+    /// Spawn a future on all workers.
+    pub(crate) fn spawn_all<T>(task: T) -> Box<[JoinHandle<T::Output>]>
+    where
+        T: Future + Send + Clone + 'static,
+        T::Output: Send + 'static,
+    {
+        let spawn_handle = runtime::context::spawn_handle().expect(CONTEXT_MISSING_ERROR);
+        let task = crate::util::trace::task(task, "task");
+        spawn_handle.spawn_all(task)
     }
 }

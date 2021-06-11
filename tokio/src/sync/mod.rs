@@ -438,6 +438,9 @@ cfg_sync! {
     mod mutex;
     pub use mutex::{Mutex, MutexGuard, TryLockError, OwnedMutexGuard, MappedMutexGuard};
 
+    mod rcu;
+    pub use rcu::{Rcu, RcuReference};
+
     pub(crate) mod notify;
     pub use notify::Notify;
 

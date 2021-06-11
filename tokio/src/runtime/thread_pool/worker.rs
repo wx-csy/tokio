@@ -16,6 +16,9 @@ use crate::runtime::{queue, task};
 use crate::util::linked_list::{Link, LinkedList};
 use crate::util::FastRand;
 
+use std::collections::VecDeque;
+use std::sync::mpsc;
+
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -33,6 +36,9 @@ pub(super) struct Worker {
 
 /// Core data
 struct Core {
+    /// The core worker id.
+    id: usize,
+
     /// Used to schedule bookkeeping tasks every so often.
     tick: u8,
 
@@ -64,6 +70,9 @@ struct Core {
 
     /// Fast random number generator.
     rand: FastRand,
+
+    /// Worker-affined task queue
+    affined: Arc<Mutex<VecDeque<Notified>>>,
 }
 
 /// State shared across all workers
@@ -87,7 +96,10 @@ pub(super) struct Shared {
 }
 
 /// Used to communicate with a worker from other threads.
-struct Remote {
+pub(super) struct Remote {
+    /// The worker id.
+    id: usize,
+
     /// Steal tasks from this worker.
     steal: queue::Steal<Arc<Worker>>,
 
@@ -97,6 +109,22 @@ struct Remote {
 
     /// Unparks the associated worker thread
     unpark: Unparker,
+
+    /// Worker-affined task queue
+    affined: Arc<Mutex<VecDeque<Notified>>>,
+}
+
+impl Remote {
+    /// The worker id
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    /// Schedule a worker-affined task
+    pub(super) fn schedule(&self, task: Notified) {
+        self.affined.lock().push_back(task);
+        self.unpark.unpark();
+    }
 }
 
 /// Thread-local context
@@ -130,13 +158,16 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
     let mut remotes = vec![];
 
     // Create the local queues
-    for _ in 0..size {
+    for id in 0..size {
         let (steal, run_queue) = queue::local();
 
         let park = park.clone();
         let unpark = park.unpark();
 
+        let affined_queue = Arc::new(Mutex::new(VecDeque::new()));
+
         cores.push(Box::new(Core {
+            id,
             tick: 0,
             lifo_slot: None,
             run_queue,
@@ -145,12 +176,15 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
             tasks: LinkedList::new(),
             park: Some(park),
             rand: FastRand::new(seed()),
+            affined: Arc::clone(&affined_queue),
         }));
 
         remotes.push(Remote {
+            id,
             steal,
             pending_drop: task::TransferStack::new(),
             unpark,
+            affined: Arc::clone(&affined_queue),
         });
     }
 
@@ -438,6 +472,11 @@ impl Context {
 }
 
 impl Core {
+    /// Get the core id
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
     /// Increment the tick
     fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
@@ -453,7 +492,7 @@ impl Core {
     }
 
     fn next_local_task(&mut self) -> Option<Notified> {
-        self.lifo_slot.take().or_else(|| self.run_queue.pop())
+        self.lifo_slot.take().or_else(|| self.affined.lock().pop_front()).or_else(|| self.run_queue.pop())
     }
 
     fn steal_work(&mut self, worker: &Worker) -> Option<Notified> {
@@ -523,7 +562,7 @@ impl Core {
     fn transition_from_parked(&mut self, worker: &Worker) -> bool {
         // If a task is in the lifo slot, then we must unpark regardless of
         // being notified
-        if self.lifo_slot.is_some() {
+        if self.lifo_slot.is_some() || !self.affined.lock().is_empty() {
             worker.shared.idle.unpark_worker_by_id(worker.index);
             self.is_searching = true;
             return true;
@@ -735,6 +774,10 @@ impl Shared {
             self.inject.push(task);
             self.notify_parked();
         });
+    }
+
+    pub(super) fn remotes(&self) -> &[Remote] {
+        &self.remotes
     }
 
     fn schedule_local(&self, core: &mut Core, task: Notified, is_yield: bool) {

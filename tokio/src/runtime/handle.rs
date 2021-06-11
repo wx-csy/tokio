@@ -148,7 +148,7 @@ impl Handle {
         let future = crate::util::trace::task(future, "task");
         self.spawner.spawn(future)
     }
-
+    
     /// Run the provided function on an executor dedicated to blocking
     /// operations.
     ///
