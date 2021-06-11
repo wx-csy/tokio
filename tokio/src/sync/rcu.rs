@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::task::Poll;
 use std::future::Future;
@@ -13,6 +14,12 @@ pub struct Rcu<T: Send + 'static> {
 
 unsafe impl <T: Send + 'static> Send for Rcu<T> {}
 unsafe impl <T: Send + Sync + 'static> Sync for Rcu<T> {}
+
+impl<T: Send + 'static> Drop for Rcu<T> {
+    fn drop(&mut self) {
+        unsafe { Box::from_raw(self.data.load(Ordering::Acquire)); }
+    }
+}
 
 impl<T: Send + 'static> Rcu<T> {
     /// Run sychronization task on all workers, ensuring grace periods are expired.
@@ -42,18 +49,19 @@ impl<T: Send + 'static> Rcu<T> {
     }
 
     /// Read the current RCU pointer. The returned reference is immutable and `!Send`.
-    pub fn read(&self) -> RcuReference<T> {
+    pub fn read(&self) -> RcuReference<'_, T> {
         RcuReference {
-            data: self.data.load(Ordering::Acquire) as *const T,
+            data: unsafe { &*(self.data.load(Ordering::Acquire) as *const T) } ,
+            _phantom: PhantomData,
         }
     }
 
     /// Compare the current RCU pointer with `expect`, and if equal, update it with `new`, 
     /// return the synchronization handle. Otherwise, return the reference to the current pointer.
     /// The entire operation is guaranteed to be atomic.
-    pub fn compare_update(&self, expect: RcuReference<T>, new: T) -> Result<RcuSyncHandle<T>, RcuReference<T>> {
+    pub fn compare_update(&self, expect: RcuReference<'_, T>, new: T) -> Result<RcuSyncHandle<T>, RcuReference<'_, T>> {
         let ptr_new = Box::into_raw(Box::new(new));
-        match self.data.compare_exchange(expect.data as *mut T, ptr_new, Ordering::AcqRel, Ordering::Acquire) {
+        match self.data.compare_exchange(expect.as_ptr() as *mut T, ptr_new, Ordering::AcqRel, Ordering::Acquire) {
             Ok(old) => {
                 Ok(RcuSyncHandle {
                     data: old
@@ -62,7 +70,8 @@ impl<T: Send + 'static> Rcu<T> {
             Err(old) => {
                 std::mem::drop(unsafe { Box::from_raw(ptr_new) });
                 Err(RcuReference {
-                    data: old,
+                    data: unsafe { &*(old as *const T) },
+                    _phantom: PhantomData,
                 })
             },
         }
@@ -141,31 +150,38 @@ impl<T: Send + 'static> Drop for RcuSyncHandle<T> {
 
 /// An immutable and `!Send` reference to the RCU data.
 #[derive(Debug, Clone, Copy)]
-pub struct RcuReference<T> {
-    data: *const T,
+pub struct RcuReference<'a, T> {
+    data: &'a T,
+    _phantom: PhantomData<*const T>,
 }
 
-unsafe impl<T: Sync> Sync for RcuReference<T> {}
+unsafe impl<T: Sync> Sync for RcuReference<'_, T> {}
 // impl<T> !Send for RcuReference<T> {}
 
-impl<T> RcuReference<T> {
+impl<'a, T> RcuReference<'a, T> {
     /// Make a new `RcuReference` from a component of the referenced data.
-    pub fn map<U, F>(this: RcuReference<T>, f: impl FnOnce(&T) -> &U) -> RcuReference<U> {
+    pub fn map<U, F>(this: RcuReference<'a, T>, f: impl FnOnce(&T) -> &U) -> RcuReference<'a, U> {
         RcuReference {
-            data: f(&*this) as *const U,
+            data: f(this.data),
+            _phantom: PhantomData,
         }
     }
 
     /// Get the inner raw pointer
-    pub fn into_inner(this: RcuReference<T>) -> *const T {
-        this.data
+    pub fn as_ptr(&self) -> *const T {
+        self.data as *const T
+    }
+
+    /// Convert to the inner raw pointer
+    pub fn too(this: RcuReference<'a, T>) -> *const T {
+        this.as_ptr()
     }
 }
 
-impl<T> Deref for RcuReference<T> {
+impl<T> Deref for RcuReference<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.data }
+        self.data
     }
 }

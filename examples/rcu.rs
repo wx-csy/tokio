@@ -18,7 +18,7 @@ const NUM_TASK: usize = 32;
 const WRITE_RATIO: u32 = 1000;
 const YIELD_RATIO: usize = 2000;
 
-#[tokio::main(worker_threads = 16)]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let test_data = Arc::new(unsafe { Rcu::new(TestStruct(0)) });
     let handles: Vec<_> = (0..NUM_TASK)

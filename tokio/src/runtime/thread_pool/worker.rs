@@ -16,7 +16,6 @@ use crate::runtime::{queue, task};
 use crate::util::linked_list::{Link, LinkedList};
 use crate::util::FastRand;
 
-use std::collections::VecDeque;
 use std::sync::mpsc;
 
 use std::cell::RefCell;
@@ -36,9 +35,6 @@ pub(super) struct Worker {
 
 /// Core data
 struct Core {
-    /// The core worker id.
-    id: usize,
-
     /// Used to schedule bookkeeping tasks every so often.
     tick: u8,
 
@@ -97,9 +93,6 @@ pub(super) struct Shared {
 
 /// Used to communicate with a worker from other threads.
 pub(super) struct Remote {
-    /// The worker id.
-    id: usize,
-
     /// Steal tasks from this worker.
     steal: queue::Steal<Arc<Worker>>,
 
@@ -115,14 +108,9 @@ pub(super) struct Remote {
 }
 
 impl Remote {
-    /// The worker id
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
     /// Schedule a worker-affined task
     pub(super) fn schedule(&self, task: Notified) {
-        self.affined.lock().send(task);
+        self.affined.lock().send(task).expect("failed to send task to target worker");
         self.unpark.unpark();
     }
 }
@@ -158,7 +146,7 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
     let mut remotes = vec![];
 
     // Create the local queues
-    for id in 0..size {
+    for _id in 0..size {
         let (steal, run_queue) = queue::local();
 
         let park = park.clone();
@@ -167,7 +155,6 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
         let (tx, rx) = mpsc::channel();
 
         cores.push(Box::new(Core {
-            id,
             tick: 0,
             lifo_slot: None,
             run_queue,
@@ -180,7 +167,6 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
         }));
 
         remotes.push(Remote {
-            id,
             steal,
             pending_drop: task::TransferStack::new(),
             unpark,
@@ -472,11 +458,6 @@ impl Context {
 }
 
 impl Core {
-    /// Get the core id
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
     /// Increment the tick
     fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
