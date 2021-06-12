@@ -77,8 +77,8 @@ impl<T: Send + 'static> Rcu<T> {
         }
     }
 
-    /// Update the current RCU pointer. The value is updated immediately, and a synchronize handle is
-    /// returned for retrieving the old value. The handle must not be dropped
+    /// Update the current RCU pointer. The value is updated immediately, and a synchronization handle is
+    /// returned for retrieving and reclaiming the old value.
     pub fn update(&self, new: T) -> RcuSyncHandle<T>  {
         self.update_boxed(Box::new(new))
     }
@@ -134,7 +134,14 @@ impl<T: Send + 'static> RcuSyncHandle<T> {
         unsafe { Self::sync_and_get(ptr) }.await 
     }
 
-    /// Do not run synchronization task and leak the old value.
+    pub fn as_ptr(&self) -> *mut T {
+        self.data
+    }
+
+    pub unsafe fn get_boxed_unsynced(self) -> Box<T> {
+        Box::from_raw(self.data)
+    }
+
     pub fn leak(self) {}
 }
 
@@ -151,8 +158,8 @@ impl<T: Send + 'static> Drop for RcuSyncHandle<T> {
 /// An immutable and `!Send` reference to the RCU data.
 #[derive(Debug, Clone, Copy)]
 pub struct RcuReference<'a, T> {
-    data: &'a T,
-    _phantom: PhantomData<*const T>,
+    data: *const T,
+    _phantom: PhantomData<&'a T>,
 }
 
 unsafe impl<T: Sync> Sync for RcuReference<'_, T> {}
@@ -162,7 +169,7 @@ impl<'a, T> RcuReference<'a, T> {
     /// Make a new `RcuReference` from a component of the referenced data.
     pub fn map<U, F>(this: RcuReference<'a, T>, f: impl FnOnce(&T) -> &U) -> RcuReference<'a, U> {
         RcuReference {
-            data: f(this.data),
+            data: f(this.deref()) as *const U,
             _phantom: PhantomData,
         }
     }
@@ -171,17 +178,12 @@ impl<'a, T> RcuReference<'a, T> {
     pub fn as_ptr(&self) -> *const T {
         self.data as *const T
     }
-
-    /// Convert to the inner raw pointer
-    pub fn too(this: RcuReference<'a, T>) -> *const T {
-        this.as_ptr()
-    }
 }
 
 impl<T> Deref for RcuReference<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.data
+        unsafe { &*self.data }
     }
 }
