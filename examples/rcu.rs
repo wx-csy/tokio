@@ -13,9 +13,9 @@ impl Drop for TestStruct {
     }
 }
 
-const NUM_ITER: usize = 10000000;
+const NUM_ITER: usize = 1000000;
 const NUM_TASK: usize = 32;
-const WRITE_RATIO: u32 = 1000;
+const WRITE_RATIO: u32 = 10000;
 const YIELD_RATIO: usize = 2000;
 
 #[tokio::main]
@@ -37,7 +37,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     Err(current) => old = current,
                                 }
                             }
-                        }.get().await;
+                        }
+                        .get()
+                        .await;
                         update_cnt += 1;
                     } else {
                         let data = (*test_data.read()).0;

@@ -13,7 +13,7 @@ impl Drop for TestStruct {
     }
 }
 
-const NUM_ITER: usize = 10000000;
+const NUM_ITER: usize = 1000000;
 const NUM_TASK: usize = 32;
 const WRITE_RATIO: u32 = 10000;
 const YIELD_RATIO: usize = 2000;

@@ -1,8 +1,8 @@
 use rand::random;
+use rcu_cell::RcuCell;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::Rcu;
-use rcu_cell::RcuCell;
 
 #[derive(Clone, Debug)]
 struct TestStruct(i32);
@@ -14,14 +14,14 @@ impl Drop for TestStruct {
     }
 }
 
-const NUM_ITER: usize = 10000000;
+const NUM_ITER: usize = 1000000;
 const NUM_TASK: usize = 32;
-const WRITE_RATIO: u32 = 1000;
+const WRITE_RATIO: u32 = 10000;
 const YIELD_RATIO: usize = 2000;
 
-#[tokio::main(worker_threads = 8)]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let test_data = Arc::new(unsafe { RcuCell::new(Some(TestStruct(0))) });
+    let test_data = Arc::new(RcuCell::new(Some(TestStruct(0))));
     let handles: Vec<_> = (0..NUM_TASK)
         .map(|_| {
             let test_data = test_data.clone();
@@ -34,7 +34,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 break lk;
                             }
                         };
-                        let new = lock.as_ref().cloned().map(|mut x| { x.0 += 1; x });
+                        let new = lock.as_ref().cloned().map(|mut x| {
+                            x.0 += 1;
+                            x
+                        });
                         lock.update(new);
                         update_cnt += 1;
                     } else {
